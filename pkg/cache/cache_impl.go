@@ -24,7 +24,6 @@ import (
 	"github.com/vllm-project/aibrix/pkg/types"
 	"github.com/vllm-project/aibrix/pkg/utils"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 // GetPod retrieves a Pod object by name from the cache
@@ -134,6 +133,27 @@ func (c *Store) ListModelsByPod(podName, podNamespace string) ([]string, error) 
 //	error: Error if Pod or metric doesn't exist
 func (c *Store) GetMetricValueByPod(podName, podNamespace, metricName string) (metrics.MetricValue, error) {
 	key := utils.GeneratePodKey(podNamespace, podName)
+	metaPod, ok := c.metaPods.Load(key)
+	if !ok {
+		return nil, fmt.Errorf("key does not exist in the cache: %s", key)
+	}
+
+	return c.getPodMetricImpl(podName, &metaPod.Metrics, metricName)
+}
+
+// GetMetricValueByPodWithPort retrieves metric value for a Pod
+// Parameters:
+//
+//	podName: Name of the Pod
+//	podNamespace: Namespace of the Pod
+//	metricName: Name of the metric
+//
+// Returns:
+//
+//	metrics.MetricValue: The metric value
+//	error: Error if Pod or metric doesn't exist
+func (c *Store) GetMetricValueByPodWithPort(podName, podNamespace, metricName string, port int) (metrics.MetricValue, error) {
+	key := utils.GenerateApiServerKey(podNamespace, podName, port)
 	metaPod, ok := c.metaPods.Load(key)
 	if !ok {
 		return nil, fmt.Errorf("key does not exist in the cache: %s", key)

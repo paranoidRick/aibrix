@@ -18,13 +18,12 @@ package utils
 
 import (
 	"encoding/json"
+	"github.com/vllm-project/aibrix/pkg/constants"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/pkoukk/tiktoken-go"
 	tiktoken_loader "github.com/pkoukk/tiktoken-go-loader"
-	"k8s.io/klog/v2"
 )
 
 // https://cookbook.openai.com/examples/how_to_count_tokens_with_tiktoken
@@ -152,4 +151,76 @@ func LoadEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	}
 	klog.Infof("set %s: %v, using default value", key, defaultValue)
 	return defaultValue
+}
+
+// GetDataParallelSize 获取 Pod 的数据并行度
+func GetDataParallelSize(pod *v1.Pod) int {
+	if pod == nil {
+		return 1
+	}
+
+	for _, container := range pod.Spec.Containers {
+		for _, env := range container.Env {
+			if env.Name == "data-parallel-size" {
+				if v, err := strconv.Atoi(env.Value); err == nil && v > 0 {
+					return v
+				}
+				klog.Warningf("Invalid data-parallel-size value %q in pod %s/%s, using default 1",
+					env.Value, pod.Namespace, pod.Name)
+				return 1
+			}
+		}
+	}
+
+	return 1
+}
+
+// GetPodPort 获取 Pod 的基础端口
+func GetPodPort(pod *v1.Pod) int {
+	if pod == nil || pod.Labels == nil {
+		return constants.DefaultPort
+	}
+
+	portStr, ok := pod.Labels[constants.ModelLabelPort]
+	if !ok || portStr == "" {
+		return constants.DefaultPort
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		klog.Warningf("Invalid port label %s=%s on pod %s/%s: %v. Using default port %d.",
+			constants.ModelLabelPort, portStr, pod.Namespace, pod.Name, err, constants.DefaultPort)
+		return constants.DefaultPort
+	}
+
+	if port < 1 || port > 65535 {
+		klog.Warningf("Port %d out of range on pod %s/%s. Using default port %d.",
+			port, pod.Namespace, pod.Name, constants.DefaultPort)
+		return constants.DefaultPort
+	}
+
+	return port
+}
+
+// GetPodPorts 通用的端口范围生成器
+func GetPodPorts(pod *v1.Pod) []int {
+	if pod == nil {
+		return []int{constants.DefaultPort}
+	}
+
+	basePort := getBasePort(pod)
+	parallelSize := getParallelSize(pod)
+
+	// 确保并行度至少为1
+	if parallelSize <= 0 {
+		parallelSize = 1
+	}
+
+	// 预分配切片
+	ports := make([]int, parallelSize)
+	for i := 0; i < parallelSize; i++ {
+		ports[i] = basePort + i
+	}
+
+	return ports
 }

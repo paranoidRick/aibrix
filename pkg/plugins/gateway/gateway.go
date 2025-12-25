@@ -24,22 +24,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog/v2"
-
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/google/uuid"
 	"github.com/vllm-project/aibrix/pkg/cache"
 	"github.com/vllm-project/aibrix/pkg/metrics"
 	routing "github.com/vllm-project/aibrix/pkg/plugins/gateway/algorithms"
 	"github.com/vllm-project/aibrix/pkg/plugins/gateway/ratelimiter"
 	"github.com/vllm-project/aibrix/pkg/types"
 	"github.com/vllm-project/aibrix/pkg/utils"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayapi "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 )
@@ -177,15 +174,22 @@ func (s *Server) selectTargetPod(ctx *types.RoutingContext, pods types.PodList, 
 		return "", fmt.Errorf("filter pods by label selector failed: %v", err)
 	}
 
-	if len(readyPods) == 0 {
+	var readApiServers []*utils.ApiServer
+	for _, pod := range readyPods {
+		for port := range utils.GetPodPorts(pod) {
+			readApiServers = append(readApiServers, &utils.ApiServer{Pod: pod, Port: port})
+		}
+	}
+
+	if len(readApiServers) == 0 {
 		return "", fmt.Errorf("no ready pods for routing")
 	}
-	if len(readyPods) == 1 {
+	if len(readApiServers) == 1 {
 		ctx.SetTargetPod(readyPods[0])
 		return ctx.TargetAddress(), nil
 	}
 
-	return router.Route(ctx, &utils.PodArray{Pods: readyPods})
+	return router.Route(ctx, &utils.ApiServerArray{ApiServers: readApiServers})
 }
 
 // validateHTTPRouteStatus checks if httproute object exists and validates its conditions are true

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"k8s.io/klog/v2"
+	"github.com/vllm-project/aibrix/pkg/utils"
 )
 
 func getPodMetricPort(pod *Pod) int {
@@ -45,4 +45,20 @@ func getPodLabel(pod *Pod, labelName string) (string, error) {
 		return "", err
 	}
 	return labelTarget, nil
+}
+
+func GetPodMetricPorts(pod *Pod) []int {
+	basePort := getPodMetricPort(pod)
+	dataParallelSize := utils.GetDataParallelSize(pod.Pod)
+
+	if dataParallelSize <= 0 {
+		dataParallelSize = 1
+	}
+
+	ports := make([]int, dataParallelSize)
+	for i := range ports {
+		ports[i] = basePort + i
+	}
+
+	return ports
 }

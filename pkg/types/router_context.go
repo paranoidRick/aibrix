@@ -70,6 +70,7 @@ type RoutingContext struct {
 	RespHeaders map[string]string
 
 	targetPodSet chan struct{}
+	targetPort   atomic.Int32
 	targetPod    atomic.Pointer[v1.Pod]
 	lastError    atomic.Pointer[error]
 	tokens       []int           // Cache of tokenized prompts
@@ -104,6 +105,14 @@ func (r *RoutingContext) SetOutputPreditor(predictor OutputPredictor) (old Outpu
 	old = r.predictor
 	r.predictor = predictor
 	return
+}
+
+func (r *RoutingContext) SetTargetPort(port int) {
+	r.targetPort.Store(int32(port))
+}
+
+func (r *RoutingContext) TargetPort() int {
+	return int(r.targetPort.Load())
 }
 
 // Delete resolves all waiting TargetPod() calls and releases the RoutingContext to the pool.
@@ -218,7 +227,12 @@ func (r *RoutingContext) TargetAddress() string {
 	if pod == nil {
 		return ""
 	}
-	return r.targetAddress(r.TargetPod())
+
+	port := r.TargetPort()
+	if port != 0 {
+		return r.targetAddressWithPort(pod.Status.PodIP, port)
+	}
+	return r.targetAddress(pod)
 }
 
 // HasRouted returns true if the request has been routed or an error has been set.
@@ -254,6 +268,10 @@ func (r *RoutingContext) GetRoutingDelay() time.Duration {
 
 func (r *RoutingContext) targetAddress(pod *v1.Pod) string {
 	return fmt.Sprintf("%v:%v", pod.Status.PodIP, utils.GetModelPortForPod(r.RequestID, pod))
+}
+
+func (r *RoutingContext) targetAddressWithPort(ip string, port int) string {
+	return fmt.Sprintf("%v:%v", ip, port)
 }
 
 func (r *RoutingContext) getError() (err error) {

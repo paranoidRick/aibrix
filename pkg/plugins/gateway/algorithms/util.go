@@ -24,7 +24,6 @@ import (
 	"github.com/vllm-project/aibrix/pkg/utils"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 // mean calculates the mean of a slice of float64 numbers.
@@ -65,4 +64,14 @@ func SelectRandomPodAsFallback(ctx *types.RoutingContext, pods []*v1.Pod, random
 		return nil, fmt.Errorf("random fallback selection failed: %w", err)
 	}
 	return targetPod, nil
+}
+
+func SelectRandomApiServerAsFallback(ctx *types.RoutingContext, servers []*utils.ApiServer, randomFunc func(int) int) (*utils.ApiServer, error) {
+	klog.Warningf("No suitable pods found; selecting a pod randomly as fallback, requestID: %s", ctx.RequestID)
+	targetServer, err := utils.SelectRandomApiServer(servers, randomFunc)
+	if err != nil {
+		klog.ErrorS(err, "Random fallback selection failed", "requestID", ctx.RequestID)
+		return nil, fmt.Errorf("random fallback selection failed: %w", err)
+	}
+	return targetServer, nil
 }

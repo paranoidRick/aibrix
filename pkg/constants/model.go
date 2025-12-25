@@ -39,6 +39,8 @@ const (
 	// ModelLabelAdapterEnabled is the label for enabling or disabling adapter dynamic registration
 	// Example: "adapter.model.aibrix.ai/enabled": "true"
 	ModelLabelAdapterEnabled = "adapter.model.aibrix.ai/enabled"
+
+	DefaultPort = 8000
 )
 
 const (

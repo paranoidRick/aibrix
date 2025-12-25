@@ -20,7 +20,7 @@ package types
 type Router interface {
 	// Route selects a target pod from the provided list of pods.
 	// The input pods is guaranteed to be non-empty and contain only routable pods.
-	Route(ctx *RoutingContext, readyPodList PodList) (string, error)
+	Route(ctx *RoutingContext, readyApiServerList ApiServerList) (string, error)
 }
 
 // QueueRouter defines the interface for routers that contains built-in queue and

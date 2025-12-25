@@ -18,20 +18,18 @@ package cache
 import (
 	"errors"
 
+	modelv1alpha1 "github.com/vllm-project/aibrix/api/model/v1alpha1"
+	v1alpha1 "github.com/vllm-project/aibrix/pkg/client/clientset/versioned"
+	v1alpha1scheme "github.com/vllm-project/aibrix/pkg/client/clientset/versioned/scheme"
 	crdinformers "github.com/vllm-project/aibrix/pkg/client/informers/externalversions"
 	"github.com/vllm-project/aibrix/pkg/constants"
 	"github.com/vllm-project/aibrix/pkg/utils"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
-
-	modelv1alpha1 "github.com/vllm-project/aibrix/api/model/v1alpha1"
-	v1alpha1 "github.com/vllm-project/aibrix/pkg/client/clientset/versioned"
-	v1alpha1scheme "github.com/vllm-project/aibrix/pkg/client/clientset/versioned/scheme"
-	"k8s.io/client-go/kubernetes/scheme"
 )
 
 const (
@@ -112,6 +110,13 @@ func (c *Store) addPod(obj interface{}) {
 	defer c.mu.Unlock()
 
 	metaPod := c.addPodLocked(pod)
+	ports := GetPodMetricPorts(pod)
+	if len(ports) > 1 {
+		for _, port := range ports {
+			c.addApiServerLocked(metaPod.Pod, port)
+		}
+	}
+
 	c.addPodAndModelMappingLocked(metaPod, modelName)
 
 	klog.V(4).Infof("POD CREATED: %s/%s", pod.Namespace, pod.Name)
@@ -161,6 +166,13 @@ func (c *Store) updatePod(oldObj interface{}, newObj interface{}) {
 	// Add new mappings if present
 	if newOk {
 		metaPod := c.addPodLocked(newPod)
+		ports := GetPodMetricPorts(metaPod)
+		if len(ports) > 1 {
+			for _, port := range ports {
+				c.addApiServerLocked(metaPod.Pod, port)
+			}
+		}
+
 		c.addPodAndModelMappingLocked(metaPod, newModelName)
 	}
 
@@ -294,6 +306,29 @@ func (c *Store) addPodLocked(pod *v1.Pod) *Pod {
 		c.bufferPod = nil
 	}
 	return metaPod
+}
+
+func (c *Store) addApiServerLocked(pod *v1.Pod, serverPort int) {
+	klog.InfoS("enter addApiServerLocked....", "serverPort", serverPort)
+	if c.bufferPod == nil {
+		klog.InfoS("now bufferApiServer is nil")
+		c.bufferPod = &Pod{
+			Pod:    pod,
+			Models: utils.NewRegistry[string](),
+		}
+	} else {
+		klog.InfoS("now bufferApiServer is not nil")
+		c.bufferPod.Pod = pod
+	}
+
+	serverKey := utils.GenerateApiServerKey(pod.Namespace, pod.Name, serverPort)
+	klog.InfoS("enter addApiServerLocked", "serverKey: ", serverKey)
+	_, loaded := c.metaPods.LoadOrStore(serverKey, c.bufferPod)
+
+	if !loaded {
+		klog.InfoS("loaded false")
+		c.bufferPod = nil
+	}
 }
 
 func (c *Store) addPodAndModelMappingLockedByName(podName, namespace, modelName string) {

@@ -24,8 +24,6 @@ import (
 	"strings"
 
 	"github.com/vllm-project/aibrix/pkg/constants"
-	"k8s.io/klog/v2"
-
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -52,6 +50,11 @@ func getDeploymentIdentifier() string {
 // GeneratePodKey generates a key in the format "namespace/name" for a given pod.
 func GeneratePodKey(podNamespace, podName string) string {
 	return fmt.Sprintf("%s/%s", podNamespace, podName)
+}
+
+// GenerateApiServerKey generates a key in the format "namespace/name" for a given api-server.
+func GenerateApiServerKey(podNamespace, podName string, serverPort int) string {
+	return fmt.Sprintf("%s/%s/%v", podNamespace, podName, serverPort)
 }
 
 // ParsePodKey parses a key in the format "namespace/podName".
@@ -222,6 +225,19 @@ func FilterRoutablePods(pods []*v1.Pod) []*v1.Pod {
 	return readyPods
 }
 
+// FilterRoutableApiServers filters and returns a list of pods that are routable.
+// A pod is routable if it have a valid PodIP and not in terminating state.
+func FilterRoutableApiServers(servers []*ApiServer) []*ApiServer {
+	readyServers := make([]*ApiServer, 0, len(servers))
+	for _, server := range servers {
+		if !FilterReadyPod(server.Pod) {
+			continue
+		}
+		readyServers = append(readyServers, server)
+	}
+	return readyServers
+}
+
 // FilterRoutablePodsInPlace filters a list of pods that are routable.
 // A pod is routable if it have a valid PodIP and not in terminating state.
 func FilterRoutablePodsInPlace(pods []*v1.Pod) []*v1.Pod {
@@ -348,6 +364,17 @@ func SelectRandomPod(pods []*v1.Pod, randomFn func(int) int) (*v1.Pod, error) {
 	}
 	randomPod := readyPods[randomFn(len(readyPods))]
 	return randomPod, nil
+}
+
+// SelectRandomApiServer selects a random pod from the provided list, ensuring it's routable.
+// It returns an error if no ready pods are available.
+func SelectRandomApiServer(servers []*ApiServer, randomFn func(int) int) (*ApiServer, error) {
+	readyServers := FilterRoutableApiServers(servers)
+	if len(readyServers) == 0 {
+		return nil, fmt.Errorf("no ready pods available for random selection")
+	}
+	randomServer := readyServers[randomFn(len(readyServers))]
+	return randomServer, nil
 }
 
 func GetModelPortForPod(requestID string, pod *v1.Pod) int64 {
