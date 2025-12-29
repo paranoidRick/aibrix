@@ -176,22 +176,15 @@ func (s *Server) selectTargetPod(ctx *types.RoutingContext, pods types.PodList, 
 		return "", fmt.Errorf("filter pods by label selector failed: %v", err)
 	}
 
-	var readApiServers []*utils.ApiServer
-	for _, pod := range readyPods {
-		for _, port := range utils.GetPodPorts(pod) {
-			readApiServers = append(readApiServers, &utils.ApiServer{Pod: pod, Port: port})
-		}
-	}
-
-	if len(readApiServers) == 0 {
+	if len(readyPods) == 0 {
 		return "", fmt.Errorf("no ready pods for routing")
 	}
-	if len(readApiServers) == 1 {
+	if len(readyPods) == 1 {
 		ctx.SetTargetPod(readyPods[0])
 		return ctx.TargetAddress(), nil
 	}
 
-	return router.Route(ctx, &utils.ApiServerArray{ApiServers: readApiServers})
+	return router.Route(ctx, &utils.PodArray{Pods: readyPods})
 }
 
 // validateHTTPRouteStatus checks if httproute object exists and validates its conditions are true

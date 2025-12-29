@@ -16,6 +16,7 @@ limitations under the License.
 package cache
 
 import (
+	"k8s.io/klog/v2"
 	"sync/atomic"
 	"time"
 
