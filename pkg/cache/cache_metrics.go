@@ -17,6 +17,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"k8s.io/klog/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,6 +147,21 @@ func (c *Store) getPodMetricImpl(podName string, metricStore *utils.SyncMap[stri
 	return metricVal, nil
 }
 
+func (c *Store) getPodMetricWithPortImpl(podName string, metricStore *utils.SyncMap[string, metrics.MetricValue], metricName string, port int) (metrics.MetricValue, error) {
+	metricKey := metricName + "/" + strconv.Itoa(port)
+	// load metricVal with port
+	metricVal, ok := metricStore.Load(metricKey)
+	if !ok {
+		return nil, &MetricNotFoundError{
+			CacheError: ErrorTypeMetricNotFound,
+			PodName:    podName,
+			MetricName: metricName,
+		}
+	}
+
+	return metricVal, nil
+}
+
 func (c *Store) getPodModelMetricName(modelName string, metricName string) string {
 	return fmt.Sprintf("%s/%s", modelName, metricName)
 }
@@ -178,7 +194,7 @@ func (c *Store) worker(jobs <-chan *Pod) {
 
 		for _, metricPort := range pod.MetricsPorts {
 			pod.currentProcessPort = metricPort
-			endpoint := fmt.Sprintf("%s:%d", pod.Status.PodIP, podMetricPort)
+			endpoint := fmt.Sprintf("%s:%d", pod.Status.PodIP, metricPort)
 			result, err := c.engineMetricsFetcher.FetchAllTypedMetrics(ctx, endpoint, engineType, identifier, metricsToFetch)
 			if err != nil {
 				klog.V(4).InfoS("Failed to fetch typed metrics from engine pod",
@@ -395,14 +411,6 @@ func (c *Store) updatePodRecord(pod *Pod, modelName string, metricName string, s
 			pod.ModelMetrics.Store(c.getPodModelMetricName(modelName, metricName), metricValue)
 		}
 		pod.ModelMetrics.Store(c.getPodModelMetricNameWithPort(modelName, metricName, pod.currentProcessPort), metricValue)
-		// only debug
-		value, ok := pod.ModelMetrics.Load(c.getPodModelMetricNameWithPort(modelName, metricName, pod.currentProcessPort))
-		if ok {
-			klog.InfoS("enter updatePodRecord...", "value is", value)
-		} else {
-			klog.InfoS("error loaded...")
-		}
-
 	} else {
 		return fmt.Errorf("scope %v is not supported", scope)
 	}

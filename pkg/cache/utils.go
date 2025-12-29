@@ -18,6 +18,7 @@ package cache
 
 import (
 	"fmt"
+	"k8s.io/klog/v2"
 	"strconv"
 
 	"github.com/vllm-project/aibrix/pkg/utils"
@@ -49,16 +50,18 @@ func getPodLabel(pod *Pod, labelName string) (string, error) {
 
 func GetPodMetricPorts(pod *Pod) []int {
 	basePort := getPodMetricPort(pod)
+	var metricPorts []int
 	dataParallelSize := utils.GetDataParallelSize(pod.Pod)
 
-	if dataParallelSize <= 0 {
-		dataParallelSize = 1
+	if dataParallelSize <= 1 {
+		metricPorts = append(metricPorts, basePort)
+		return metricPorts
 	}
 
-	ports := make([]int, dataParallelSize)
-	for i := range ports {
-		ports[i] = basePort + i
+	metricPorts = make([]int, dataParallelSize)
+	for i := range metricPorts {
+		metricPorts[i] = basePort + i
 	}
 
-	return ports
+	return metricPorts
 }

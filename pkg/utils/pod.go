@@ -19,6 +19,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"k8s.io/klog/v2"
 	"regexp"
 	"strconv"
 	"strings"
@@ -276,6 +277,17 @@ func FilterPodByName(podname string, pods []*v1.Pod) (*v1.Pod, bool) {
 	for _, pod := range pods {
 		if pod.Name == podname {
 			return pod, true
+		}
+	}
+	return nil, false
+}
+
+// FilterApiServerByName returns the pod with the given name.
+func FilterApiServerByName(servername string, servers []*ApiServer) (*ApiServer, bool) {
+	for _, server := range servers {
+		name := GenerateApiServerKey(server.Namespace, server.Name, server.Port)
+		if servername == name {
+			return server, true
 		}
 	}
 	return nil, false

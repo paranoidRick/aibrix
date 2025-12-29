@@ -17,6 +17,7 @@ package cache
 
 import (
 	"errors"
+	"k8s.io/klog/v2"
 
 	modelv1alpha1 "github.com/vllm-project/aibrix/api/model/v1alpha1"
 	v1alpha1 "github.com/vllm-project/aibrix/pkg/client/clientset/versioned"
@@ -110,7 +111,7 @@ func (c *Store) addPod(obj interface{}) {
 	defer c.mu.Unlock()
 
 	metaPod := c.addPodLocked(pod)
-	ports := GetPodMetricPorts(pod)
+	ports := GetPodMetricPorts(metaPod)
 	if len(ports) > 1 {
 		for _, port := range ports {
 			c.addApiServerLocked(metaPod.Pod, port)
@@ -309,24 +310,18 @@ func (c *Store) addPodLocked(pod *v1.Pod) *Pod {
 }
 
 func (c *Store) addApiServerLocked(pod *v1.Pod, serverPort int) {
-	klog.InfoS("enter addApiServerLocked....", "serverPort", serverPort)
 	if c.bufferPod == nil {
-		klog.InfoS("now bufferApiServer is nil")
 		c.bufferPod = &Pod{
 			Pod:    pod,
 			Models: utils.NewRegistry[string](),
 		}
 	} else {
-		klog.InfoS("now bufferApiServer is not nil")
 		c.bufferPod.Pod = pod
 	}
 
 	serverKey := utils.GenerateApiServerKey(pod.Namespace, pod.Name, serverPort)
-	klog.InfoS("enter addApiServerLocked", "serverKey: ", serverKey)
 	_, loaded := c.metaPods.LoadOrStore(serverKey, c.bufferPod)
-
 	if !loaded {
-		klog.InfoS("loaded false")
 		c.bufferPod = nil
 	}
 }

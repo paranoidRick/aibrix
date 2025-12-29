@@ -89,11 +89,12 @@ type MetricCache interface {
 	//   error: Error information if operation fails
 	GetMetricValueByPod(podName, podNamespace, metricName string) (metrics.MetricValue, error)
 
-	// GetMetricValueByPodWithPort gets metric value for a apiServer
+	// GetMetricValueByPodWithPort gets metric value for a vllm api server
 	// Parameters:
 	//   podName: Name of the pod
 	//   podNamespace: Namespace of the pod
 	//   metricName: Name of the metric
+	//   port: Port of the vllm api server
 	// Returns:
 	//   metrics.MetricValue: Retrieved metric value
 	//   error: Error information if operation fails

@@ -18,7 +18,9 @@ package utils
 
 import (
 	"encoding/json"
+	"github.com/pkoukk/tiktoken-go"
 	"github.com/vllm-project/aibrix/pkg/constants"
+	"k8s.io/klog/v2"
 	"os"
 	"strconv"
 	"time"
@@ -153,7 +155,6 @@ func LoadEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	return defaultValue
 }
 
-// GetDataParallelSize 获取 Pod 的数据并行度
 func GetDataParallelSize(pod *v1.Pod) int {
 	if pod == nil {
 		return 1
@@ -175,7 +176,6 @@ func GetDataParallelSize(pod *v1.Pod) int {
 	return 1
 }
 
-// GetPodPort 获取 Pod 的基础端口
 func GetPodPort(pod *v1.Pod) int {
 	if pod == nil || pod.Labels == nil {
 		return constants.DefaultPort
@@ -204,22 +204,18 @@ func GetPodPort(pod *v1.Pod) int {
 
 // GetPodPorts 通用的端口范围生成器
 func GetPodPorts(pod *v1.Pod) []int {
-	if pod == nil {
-		return []int{constants.DefaultPort}
+	port := GetPodPort(pod)
+	var ports []int
+	size := GetDataParallelSize(pod)
+
+	if size <= 1 {
+		ports = append(ports, port)
+		return ports
 	}
 
-	basePort := getBasePort(pod)
-	parallelSize := getParallelSize(pod)
-
-	// 确保并行度至少为1
-	if parallelSize <= 0 {
-		parallelSize = 1
-	}
-
-	// 预分配切片
-	ports := make([]int, parallelSize)
-	for i := 0; i < parallelSize; i++ {
-		ports[i] = basePort + i
+	ports = make([]int, size)
+	for i := 0; i < size; i++ {
+		ports[i] = port + i
 	}
 
 	return ports

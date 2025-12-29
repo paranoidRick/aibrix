@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/redis/go-redis/v9"
 	"io"
+	"k8s.io/klog/v2"
 	"strings"
 	"time"
 
@@ -176,7 +178,7 @@ func (s *Server) selectTargetPod(ctx *types.RoutingContext, pods types.PodList, 
 
 	var readApiServers []*utils.ApiServer
 	for _, pod := range readyPods {
-		for port := range utils.GetPodPorts(pod) {
+		for _, port := range utils.GetPodPorts(pod) {
 			readApiServers = append(readApiServers, &utils.ApiServer{Pod: pod, Port: port})
 		}
 	}
