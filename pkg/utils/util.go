@@ -18,12 +18,15 @@ package utils
 
 import (
 	"encoding/json"
-	"github.com/pkoukk/tiktoken-go"
-	"github.com/vllm-project/aibrix/pkg/constants"
-	"k8s.io/klog/v2"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/pkoukk/tiktoken-go"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+
+	"github.com/vllm-project/aibrix/pkg/constants"
 
 	tiktoken_loader "github.com/pkoukk/tiktoken-go-loader"
 )

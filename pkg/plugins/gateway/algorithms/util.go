@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"math"
 
+	"k8s.io/klog/v2"
+
 	"github.com/vllm-project/aibrix/pkg/types"
 	"github.com/vllm-project/aibrix/pkg/utils"
 

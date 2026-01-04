@@ -17,14 +17,16 @@ package cache
 import (
 	"context"
 	"fmt"
-	"k8s.io/klog/v2"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	prometheusv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	dto "github.com/prometheus/client_model/go"
+
 	"github.com/vllm-project/aibrix/pkg/constants"
 	"github.com/vllm-project/aibrix/pkg/metrics"
 	"github.com/vllm-project/aibrix/pkg/utils"
@@ -147,19 +149,8 @@ func (c *Store) getPodMetricImpl(podName string, metricStore *utils.SyncMap[stri
 	return metricVal, nil
 }
 
-func (c *Store) getPodMetricWithPortImpl(podName string, metricStore *utils.SyncMap[string, metrics.MetricValue], metricName string, port int) (metrics.MetricValue, error) {
-	metricKey := metricName + "/" + strconv.Itoa(port)
-	// load metricVal with port
-	metricVal, ok := metricStore.Load(metricKey)
-	if !ok {
-		return nil, &MetricNotFoundError{
-			CacheError: ErrorTypeMetricNotFound,
-			PodName:    podName,
-			MetricName: metricName,
-		}
-	}
-
-	return metricVal, nil
+func (c *Store) getPodApiServerMetricName(metricName string, port int) string {
+	return fmt.Sprintf("%s/%d", metricName, port)
 }
 
 func (c *Store) getPodModelMetricName(modelName string, metricName string) string {
@@ -183,16 +174,13 @@ func (c *Store) updatePodMetrics() {
 
 func (c *Store) worker(jobs <-chan *Pod) {
 	for pod := range jobs {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-		pod.MetricsPorts = GetPodMetricPorts(pod)
-
 		// Use centralized typed metrics fetcher for better engine abstraction and error handling
 		metricsToFetch := c.getAllAvailableMetrics()
 		engineType := metrics.GetEngineType(*pod.Pod)
 		identifier := pod.Name
 
-		for _, metricPort := range pod.MetricsPorts {
+		for _, metricPort := range GetPodMetricPorts(pod) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			pod.currentProcessPort = metricPort
 			endpoint := fmt.Sprintf("%s:%d", pod.Status.PodIP, metricPort)
 			result, err := c.engineMetricsFetcher.FetchAllTypedMetrics(ctx, endpoint, engineType, identifier, metricsToFetch)
@@ -220,8 +208,8 @@ func (c *Store) worker(jobs <-chan *Pod) {
 				"podMetrics", len(result.Metrics),
 				"modelMetrics", len(result.ModelMetrics),
 				"errors", len(result.Errors))
+			cancel()
 		}
-		cancel()
 	}
 }
 
