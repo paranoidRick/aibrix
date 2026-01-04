@@ -20,11 +20,12 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+
 	"github.com/vllm-project/aibrix/pkg/metrics"
 	"github.com/vllm-project/aibrix/pkg/types"
 	"github.com/vllm-project/aibrix/pkg/utils"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 // GetPod retrieves a Pod object by name from the cache
@@ -160,7 +161,7 @@ func (c *Store) GetMetricValueByPodWithPort(podName, podNamespace, metricName st
 		return nil, fmt.Errorf("key does not exist in the cache: %s", key)
 	}
 
-	return c.getPodWithPortMetricImpl(podName, &metaPod.Metrics, metricName, port)
+	return c.getPodMetricImpl(podName, &metaPod.Metrics, c.getPodApiServerMetricName(metricName, port))
 }
 
 // GetMetricValueByPodModel retrieves metric value for Pod-Model combination

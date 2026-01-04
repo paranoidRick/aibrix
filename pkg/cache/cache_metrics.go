@@ -166,6 +166,10 @@ func (c *Store) getPodModelMetricName(modelName string, metricName string) strin
 	return fmt.Sprintf("%s/%s", modelName, metricName)
 }
 
+func (c *Store) getPodApiServerMetricName(metricName string, port int) string {
+	return fmt.Sprintf("%s/%d", metricName, port)
+}
+
 func (c *Store) updatePodMetrics() {
 	c.metaPods.Range(func(key string, metaPod *Pod) bool {
 		if !utils.FilterReadyPod(metaPod.Pod) {
