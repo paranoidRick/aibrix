@@ -148,20 +148,6 @@ func (c *Store) getPodMetricImpl(podName string, metricStore *utils.SyncMap[stri
 	return metricVal, nil
 }
 
-func (c *Store) getPodWithPortMetricImpl(podName string, metricStore *utils.SyncMap[string, metrics.MetricValue], metricName string, port int) (metrics.MetricValue, error) {
-	metricNameWithPort := metricName + "/" + strconv.Itoa(port)
-	metricVal, ok := metricStore.Load(metricNameWithPort)
-	if !ok {
-		return nil, &MetricNotFoundError{
-			CacheError: ErrorTypeMetricNotFound,
-			PodName:    podName,
-			MetricName: metricName,
-		}
-	}
-
-	return metricVal, nil
-}
-
 func (c *Store) getPodModelMetricName(modelName string, metricName string) string {
 	return fmt.Sprintf("%s/%s", modelName, metricName)
 }
