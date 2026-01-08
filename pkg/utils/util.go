@@ -193,6 +193,33 @@ func GetPortsForPod(pod *v1.Pod) []int {
 	return ports
 }
 
+func IsMultiPortsForPods(pods []*v1.Pod) bool {
+	if len(pods) == 0 {
+		return false
+	}
+
+	for _, pod := range pods {
+		if isMultiPortsForPod(pod) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isMultiPortsForPod(pod *v1.Pod) bool {
+	if pod == nil || pod.Labels == nil {
+		return false
+	}
+
+	dpSize := getDataParallelSize(pod)
+	if dpSize <= 1 {
+		return false
+	}
+
+	return true
+}
+
 // getBasePortFromLabels extracts the base port from pod labels
 func getBasePortFromLabels(pod *v1.Pod) (int, error) {
 	portStr, ok := pod.Labels[constants.ModelLabelPort]

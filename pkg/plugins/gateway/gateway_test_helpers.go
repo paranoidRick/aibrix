@@ -84,8 +84,18 @@ func (m *MockCache) GetMetricValueByPod(namespace string, podName string, metric
 	return args.Get(0).(metrics.MetricValue), args.Error(1)
 }
 
+func (m *MockCache) GetMetricValueByPodWithPort(namespace string, podName string, metricName string, port int) (metrics.MetricValue, error) {
+	args := m.Called(namespace, podName, metricName, port)
+	return args.Get(0).(metrics.MetricValue), args.Error(1)
+}
+
 func (m *MockCache) GetMetricValueByPodModel(namespace string, podName string, model string, metricName string) (metrics.MetricValue, error) {
 	args := m.Called(namespace, podName, model, metricName)
+	return args.Get(0).(metrics.MetricValue), args.Error(1)
+}
+
+func (m *MockCache) GetMetricValueByPodModelWithPort(namespace string, podName string, model string, metricName string, port int) (metrics.MetricValue, error) {
+	args := m.Called(namespace, podName, model, metricName, port)
 	return args.Get(0).(metrics.MetricValue), args.Error(1)
 }
 

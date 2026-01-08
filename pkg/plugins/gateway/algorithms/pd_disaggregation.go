@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,6 +78,8 @@ type pdRouter struct {
 	prefixCacheIndexer    *prefixcacheindexer.PrefixHashTable
 	prefillRequestTracker *PrefillRequestTracker
 	httpClient            *http.Client
+
+	isMultiServerPort bool
 }
 
 // PrefillRequestTracker manages prefill-specific request counts
@@ -136,7 +139,7 @@ func (r pdRouter) Route(ctx *types.RoutingContext, readyPodList types.PodList) (
 		return "", fmt.Errorf("engine validation failed for request %s: %w", ctx.RequestID, err)
 	}
 
-	prefillPod, decodePod, err := r.filterPrefillDecodePods(ctx, readyPodList.All())
+	prefillPod, decodePod, decodePort, err := r.filterPrefillDecodePods(ctx, readyPodList.All())
 	if err != nil {
 		return "", fmt.Errorf("failed to filter prefill/decode pods for request %s: %w", ctx.RequestID, err)
 	}
@@ -149,11 +152,13 @@ func (r pdRouter) Route(ctx *types.RoutingContext, readyPodList types.PodList) (
 	}
 
 	ctx.SetTargetPod(decodePod)
+	ctx.SetTargetPort(decodePort)
 	return ctx.TargetAddress(), nil
 }
 
 type Scores struct {
 	Pod   *v1.Pod
+	Port  int
 	Score float64
 }
 
@@ -161,7 +166,7 @@ type Scores struct {
 // For multi-node tensor parallelism (e.g., TP=16 with node_rank=0 and node_rank=1),
 // only pods with PodGroupIndex="0" (node_rank=0) are selected as they run the HTTP server.
 // Pods without PodGroupIndex label are also included for backward compatibility.
-func (r *pdRouter) filterPrefillDecodePods(routingCtx *types.RoutingContext, readyPods []*v1.Pod) (*v1.Pod, *v1.Pod, error) {
+func (r *pdRouter) filterPrefillDecodePods(routingCtx *types.RoutingContext, readyPods []*v1.Pod) (*v1.Pod, *v1.Pod, int, error) {
 	prefillPods, decodePods := []*v1.Pod{}, []*v1.Pod{}
 	promptLengthBucketingPrefillPods, promptLengthBucketingDecodePods := []*v1.Pod{}, []*v1.Pod{}
 
@@ -211,14 +216,25 @@ func (r *pdRouter) filterPrefillDecodePods(routingCtx *types.RoutingContext, rea
 	}
 
 	if len(prefillPods) == 0 || len(decodePods) == 0 {
-		return nil, nil, fmt.Errorf("prefill or decode pods are not ready: prefill=%d, decode=%d", len(prefillPods), len(decodePods))
+		return nil, nil, 0, fmt.Errorf("prefill or decode pods are not ready: prefill=%d, decode=%d", len(prefillPods), len(decodePods))
 	}
 	// check for prefill and decode imbalance
-	targetPod, isImbalanced := r.loadImbalanceSelectPrefillPod(prefillPods, r.prefillRequestTracker.GetPrefillRequestCountsForPods(prefillPods))
-	if isImbalanced {
+	if utils.IsMultiPortsForPods(prefillPods) {
+		r.isMultiServerPort = true
+	}
+
+	var tmp map[string]int32
+	if r.isMultiServerPort {
+		tmp = r.prefillRequestTracker.getPrefillRequestCountsForPodsWithPort(prefillPods)
+	} else {
+		tmp = r.prefillRequestTracker.GetPrefillRequestCountsForPods(prefillPods)
+	}
+
+	targetPod, isImbalanced := r.loadImbalanceSelectPrefillPod(prefillPods, tmp)
+	if isImbalanced { // 如果负载不均衡直接选择目标pod
 		klog.InfoS("load imbalance detected, selecting least-loaded prefill pod", "request_id", routingCtx.RequestID, "selected_prefill_pod", targetPod.Name)
 		prefillPods = []*v1.Pod{targetPod}
-		decodePods = utils.FilterPodsByLabel(decodePods, PDRoleSetIdentifier, targetPod.Labels[PDRoleSetIdentifier])
+		decodePods = utils.FilterPodsByLabel(decodePods, PDRoleSetIdentifier, targetPod.Labels[PDRoleSetIdentifier]) // 将目标pod对应的d也选择出来
 	}
 
 	targetPod, maxRequestCount, maxThroughput, maxFreeGPUUsage, podRequestCounts, podThroughputs, podFreeGpuUsage := r.loadImbalanceSelectDecodePod(routingCtx, decodePods)
@@ -231,10 +247,12 @@ func (r *pdRouter) filterPrefillDecodePods(routingCtx *types.RoutingContext, rea
 	}
 	klog.InfoS("filtered prefill/decode pods", "request_id", routingCtx.RequestID, "prefill_pods", len(prefillPods), "decode_pods", len(decodePods))
 
+	// PD 均衡
 	prefillScores, maxPrefillScore, prefixHashes := r.scorePrefillPods(routingCtx, prefillPods)
 	decodeScores, maxDecodeScore := r.scoreDecodePods(routingCtx, decodePods, maxRequestCount, maxThroughput, maxFreeGPUUsage, podRequestCounts, podThroughputs, podFreeGpuUsage)
 
 	var targetPrefillPod, targetDecodePod *v1.Pod
+	var targetPrefillPort, targetDecodePort int
 	minScore := math.MaxFloat64
 	for roleset, prefillScore := range prefillScores {
 		decodeScore, ok := decodeScores[roleset]
@@ -249,6 +267,8 @@ func (r *pdRouter) filterPrefillDecodePods(routingCtx *types.RoutingContext, rea
 			minScore = normalizedPrefillScore + normalizedDecodeScore
 			targetPrefillPod = prefillScore.Pod
 			targetDecodePod = decodeScore.Pod
+			targetPrefillPort = prefillScore.Port
+			targetDecodePort = decodeScore.Port
 		}
 		klog.InfoS("final_score", "request_id", routingCtx.RequestID, "roleset", roleset,
 			"final_score", minScore,
@@ -263,13 +283,14 @@ func (r *pdRouter) filterPrefillDecodePods(routingCtx *types.RoutingContext, rea
 	}()
 
 	if targetPrefillPod == nil {
-		return nil, nil, fmt.Errorf("target prefill  pod is nil")
+		return nil, nil, 0, fmt.Errorf("target prefill  pod is nil")
 	}
 	if targetDecodePod == nil {
-		return nil, nil, fmt.Errorf("target decode pod is nil")
+		return nil, nil, 0, fmt.Errorf("target decode pod is nil")
 	}
+	routingCtx.SetTargetPort(targetPrefillPort)
 
-	return targetPrefillPod, targetDecodePod, nil
+	return targetPrefillPod, targetDecodePod, targetDecodePort, nil
 }
 
 // loadImbalanceSelectPrefillPod evaluates if the load is imbalanced based on the abs difference between
@@ -293,12 +314,13 @@ func (r *pdRouter) loadImbalanceSelectPrefillPod(readyPods []*v1.Pod, podRequest
 			maxValue = value
 		}
 	}
-	for podname, value := range podRequestCount {
+	for podname, value := range podRequestCount { // name + port
 		if minValue == value {
 			targetPods = append(targetPods, podname)
 		}
 	}
 
+	// TODO:
 	if maxValue-minValue > 32 && len(targetPods) > 0 {
 		targetPod, _ = utils.FilterPodByName(targetPods[rand.Intn(len(targetPods))], readyPods)
 		imbalance = true
@@ -326,40 +348,42 @@ func (r *pdRouter) loadImbalanceSelectDecodePod(ctx *types.RoutingContext, filte
 	maxFreeGPUUsage := float64(1)
 
 	for _, pod := range filteredDecodePods {
-		runningReqs, err := r.cache.GetMetricValueByPod(pod.Name, pod.Namespace, metrics.RealtimeNumRequestsRunning)
-		if err != nil {
-			runningReqs = &metrics.SimpleMetricValue{Value: 0}
-		}
-		requestCount := runningReqs.GetSimpleValue()
-		podRequestCounts[pod.Name] = requestCount
-		if requestCount < minRequestCount {
-			minRequestCount = requestCount
-			minRequestPod = pod
-		}
-		maxRequestCount = math.Max(maxRequestCount, requestCount)
+		for _, port := range utils.GetPortsForPod(pod) {
+			runningReqs, err := r.getPodMetric(pod.Name, pod.Namespace, metrics.RealtimeNumRequestsRunning, port)
+			if err != nil {
+				runningReqs = &metrics.SimpleMetricValue{Value: 0}
+			}
+			requestCount := runningReqs.GetSimpleValue()
+			podRequestCounts[pod.Name] = requestCount
+			if requestCount < minRequestCount {
+				minRequestCount = requestCount
+				minRequestPod = pod
+			}
+			maxRequestCount = math.Max(maxRequestCount, requestCount)
 
-		tokenThroughput, err := r.cache.GetMetricValueByPodModel(pod.Name, pod.Namespace, ctx.Model, metrics.AvgGenerationThroughputToksPerS)
-		if err != nil {
-			tokenThroughput = &metrics.SimpleMetricValue{Value: 0}
-		}
-		throughput := tokenThroughput.GetSimpleValue()
-		podThroughputs[pod.Name] = throughput
-		if throughput < minThroughput {
-			minThroughput = throughput
-			minThroughputPod = pod
-		}
-		maxThroughput = math.Max(maxThroughput, throughput)
+			tokenThroughput, err := r.getPodModelMetric(pod.Name, pod.Namespace, ctx.Model, metrics.AvgGenerationThroughputToksPerS, port)
+			if err != nil {
+				tokenThroughput = &metrics.SimpleMetricValue{Value: 0}
+			}
+			throughput := tokenThroughput.GetSimpleValue()
+			podThroughputs[pod.Name] = throughput
+			if throughput < minThroughput {
+				minThroughput = throughput
+				minThroughputPod = pod
+			}
+			maxThroughput = math.Max(maxThroughput, throughput)
 
-		gpuUsage, err := r.cache.GetMetricValueByPodModel(pod.Name, pod.Namespace, ctx.Model, metrics.GPUCacheUsagePerc)
-		if err != nil {
-			gpuUsage = &metrics.SimpleMetricValue{Value: 0}
+			gpuUsage, err := r.getPodModelMetric(pod.Name, pod.Namespace, ctx.Model, metrics.GPUCacheUsagePerc, port)
+			if err != nil {
+				gpuUsage = &metrics.SimpleMetricValue{Value: 0}
+			}
+			podFreeGpuUsage[pod.Name] = math.Round(100 - gpuUsage.GetSimpleValue()*100)
+			if podFreeGpuUsage[pod.Name] <= 0 {
+				podFreeGpuUsage[pod.Name] = 0.1
+			}
+			minFreeGPUUsage = math.Min(minFreeGPUUsage, podFreeGpuUsage[pod.Name])
+			maxFreeGPUUsage = math.Max(maxFreeGPUUsage, podFreeGpuUsage[pod.Name])
 		}
-		podFreeGpuUsage[pod.Name] = math.Round(100 - gpuUsage.GetSimpleValue()*100)
-		if podFreeGpuUsage[pod.Name] <= 0 {
-			podFreeGpuUsage[pod.Name] = 0.1
-		}
-		minFreeGPUUsage = math.Min(minFreeGPUUsage, podFreeGpuUsage[pod.Name])
-		maxFreeGPUUsage = math.Max(maxFreeGPUUsage, podFreeGpuUsage[pod.Name])
 	}
 
 	if minRequestCount == 0 || maxRequestCount-minRequestCount >= aibrixDecodeMaxRequest {
@@ -392,11 +416,15 @@ func (r *pdRouter) scorePrefillPods(routingCtx *types.RoutingContext, prefillPod
 		return nil, 0, nil
 	}
 
-	var maxRequestCount float64 = 1
-	requestCount := []float64{}
-	readyPodsMap := map[string]struct{}{}
-	podRequestCount := r.prefillRequestTracker.GetPrefillRequestCountsForPods(prefillPods)
+	var podRequestCount map[string]int32
+	if r.isMultiServerPort {
+		podRequestCount = r.prefillRequestTracker.getPrefillRequestCountsForPodsWithPort(prefillPods)
+	} else {
+		podRequestCount = r.prefillRequestTracker.GetPrefillRequestCountsForPods(prefillPods)
+	}
 
+	var maxRequestCount float64 = 1
+	requestCount := make([]float64, 0, len(podRequestCount))
 	// klog.InfoS("prefill_pod_request_count", "request_id", routingCtx.RequestID, "pod_request_count", podRequestCount)
 	for _, cnt := range podRequestCount {
 		countFloat := float64(cnt)
@@ -407,8 +435,12 @@ func (r *pdRouter) scorePrefillPods(routingCtx *types.RoutingContext, prefillPod
 	}
 	meanRequestCount := mean(requestCount)
 	stdDevRequestCount := standardDeviation(requestCount)
+
+	readyPodsMap := map[string]struct{}{}
 	for _, pod := range prefillPods {
-		readyPodsMap[pod.Name] = struct{}{}
+		for _, key := range r.getPodInstanceKeys(pod) {
+			readyPodsMap[key] = struct{}{}
+		}
 	}
 
 	matchedPods, prefixHashes := r.prefixCacheIndexer.MatchPrefix(tokens, routingCtx.Model, readyPodsMap)
@@ -416,29 +448,33 @@ func (r *pdRouter) scorePrefillPods(routingCtx *types.RoutingContext, prefillPod
 	maxPrefillScore := float64(1)
 	for _, pod := range prefillPods {
 		rolesetName := pod.Labels[PDRoleSetIdentifier]
-		reqCnt := float64(podRequestCount[pod.Name])
-		if reqCnt > meanRequestCount+float64(standardDeviationFactor)*stdDevRequestCount {
-			klog.InfoS("prefill pod request count is higher than mean request count, skipping", "request_id", routingCtx.RequestID, "pod_name", pod.Name,
-				"req_cnt", reqCnt, "mean_req_cnt", meanRequestCount, "std_dev_req_cnt", stdDevRequestCount)
-			continue
-		}
 
-		prefillScore := (100-float64(matchedPods[pod.Name]))*.1 + (reqCnt / maxRequestCount)
-		if existingScore, exists := prefillScores[rolesetName]; !exists || prefillScore < existingScore.Score {
-			prefillScores[rolesetName] = &Scores{
-				Pod:   pod,
-				Score: prefillScore,
+		for _, key := range r.getPodInstanceKeys(pod) {
+			reqCnt := float64(podRequestCount[key])
+			if reqCnt > meanRequestCount+float64(standardDeviationFactor)*stdDevRequestCount {
+				klog.InfoS("prefill pod request count is higher than mean request count, skipping", "request_id", routingCtx.RequestID, "pod_name", pod.Name,
+					"req_cnt", reqCnt, "mean_req_cnt", meanRequestCount, "std_dev_req_cnt", stdDevRequestCount)
+				continue
 			}
-		}
-		if prefillScore > maxPrefillScore {
-			maxPrefillScore = prefillScore
-		}
 
-		klog.InfoS("prefill_score", "request_id", routingCtx.RequestID, "pod_name", pod.Name,
-			"prefill_score", prefillScore,
-			"score", fmt.Sprintf("(100 - %f) * 0.1 + %f / %f", float64(matchedPods[pod.Name]), reqCnt, maxRequestCount),
-			"prefix_match_percent", float64(matchedPods[pod.Name]),
-			"running_reqs", reqCnt, "max_running_reqs", maxRequestCount)
+			prefillScore := (100-float64(matchedPods[key]))*.1 + (reqCnt / maxRequestCount) // 匹配度越高（MatchPercent 越大），这一项的分值就越小，加号后面正在处理的请求越少，这一项的值越接近 0
+			if existingScore, exists := prefillScores[rolesetName]; !exists || prefillScore < existingScore.Score {
+				prefillScores[rolesetName] = &Scores{
+					Pod:   pod,
+					Port:  r.extractPortFromKey(key),
+					Score: prefillScore,
+				}
+			}
+			if prefillScore > maxPrefillScore {
+				maxPrefillScore = prefillScore
+			}
+
+			klog.InfoS("prefill_score", "request_id", routingCtx.RequestID, "pod_name", pod.Name,
+				"prefill_score", prefillScore,
+				"score", fmt.Sprintf("(100 - %f) * 0.1 + %f / %f", float64(matchedPods[key]), reqCnt, maxRequestCount),
+				"prefix_match_percent", float64(matchedPods[key]),
+				"running_reqs", reqCnt, "max_running_reqs", maxRequestCount)
+		}
 	}
 
 	return prefillScores, maxPrefillScore, prefixHashes
@@ -455,26 +491,29 @@ func (r *pdRouter) scoreDecodePods(routingCtx *types.RoutingContext, filteredDec
 	for _, pod := range filteredDecodePods {
 		rolesetName := pod.Labels[PDRoleSetIdentifier]
 
-		normalizedRunningReqs := podRequestCounts[pod.Name] / maxRequestCount
-		normalizedThroughput := 1 - podThroughputs[pod.Name]/maxThroughput
-		normalizedFreeGPUPercent := podFreeGpuUsage[pod.Name] / maxFreeGPUUsage
+		for _, key := range r.getPodInstanceKeys(pod) {
+			normalizedRunningReqs := podRequestCounts[key] / maxRequestCount
+			normalizedThroughput := 1 - podThroughputs[key]/maxThroughput
+			normalizedFreeGPUPercent := podFreeGpuUsage[key] / maxFreeGPUUsage
 
-		decodeScore := (normalizedRunningReqs + normalizedThroughput) / normalizedFreeGPUPercent
-		if existingScore, exists := decodeScores[rolesetName]; !exists || decodeScore < existingScore.Score {
-			decodeScores[rolesetName] = &Scores{
-				Pod:   pod,
-				Score: decodeScore,
+			decodeScore := (normalizedRunningReqs + normalizedThroughput) / normalizedFreeGPUPercent
+			if existingScore, exists := decodeScores[rolesetName]; !exists || decodeScore < existingScore.Score {
+				decodeScores[rolesetName] = &Scores{
+					Pod:   pod,
+					Port:  r.extractPortFromKey(key),
+					Score: decodeScore,
+				}
 			}
-		}
-		if decodeScore > maxDecodeScore {
-			maxDecodeScore = decodeScore
-		}
+			if decodeScore > maxDecodeScore {
+				maxDecodeScore = decodeScore
+			}
 
-		klog.InfoS("decode_score", "request_id", routingCtx.RequestID, "pod_name", pod.Name, "decode_score", decodeScore,
-			"score", fmt.Sprintf("(%f + %f) / %f", normalizedRunningReqs, normalizedThroughput, normalizedFreeGPUPercent),
-			"running_reqs", podRequestCounts[pod.Name], "max_running_reqs", maxRequestCount,
-			"throughput", podThroughputs[pod.Name], "max_throughput", maxThroughput,
-			"free_gpu", podFreeGpuUsage[pod.Name], "max_free_gpu_usage", maxFreeGPUUsage)
+			klog.InfoS("decode_score", "request_id", routingCtx.RequestID, "pod_name", pod.Name, "decode_score", decodeScore,
+				"score", fmt.Sprintf("(%f + %f) / %f", normalizedRunningReqs, normalizedThroughput, normalizedFreeGPUPercent),
+				"running_reqs", podRequestCounts[key], "max_running_reqs", maxRequestCount,
+				"throughput", podThroughputs[key], "max_throughput", maxThroughput,
+				"free_gpu", podFreeGpuUsage[key], "max_free_gpu_usage", maxFreeGPUUsage)
+		}
 	}
 
 	return decodeScores, maxDecodeScore
@@ -487,10 +526,15 @@ func (r *pdRouter) doPrefillRequest(routingCtx *types.RoutingContext, prefillPod
 		return fmt.Errorf("failed to prepare prefill payload for request %s: %w", routingCtx.RequestID, err)
 	}
 
+	targetPort := routingCtx.TargetPort()
+	if targetPort == 0 {
+		targetPort = int(utils.GetModelPortForPod(routingCtx.RequestID, prefillPod))
+	}
+
 	// Execute HTTP request
 	apiURL := fmt.Sprintf("http://%s:%d%s",
 		prefillPod.Status.PodIP,
-		utils.GetModelPortForPod(routingCtx.RequestID, prefillPod),
+		targetPort,
 		routingCtx.ReqPath)
 
 	klog.InfoS("start_prefill_request",
@@ -499,7 +543,14 @@ func (r *pdRouter) doPrefillRequest(routingCtx *types.RoutingContext, prefillPod
 		"prefill_pod", prefillPod.Name,
 		"prefill_url", apiURL)
 
-	r.prefillRequestTracker.AddPrefillRequest(routingCtx.RequestID, prefillPod.Name)
+	var reqPrefillKeyName string
+	if targetPort == 0 {
+		reqPrefillKeyName = prefillPod.Name
+	} else {
+		reqPrefillKeyName = prefillPod.Name + "/" + strconv.Itoa(targetPort)
+	}
+
+	r.prefillRequestTracker.AddPrefillRequest(routingCtx.RequestID, reqPrefillKeyName)
 	switch llmEngine {
 	case SGLangEngine:
 		// For SGLang, use async prefill - the bootstrap mechanism (bootstrap_host/port/room)
@@ -512,6 +563,7 @@ func (r *pdRouter) doPrefillRequest(routingCtx *types.RoutingContext, prefillPod
 					"llm_engine", llmEngine,
 					"prefill_pod", prefillPod.Name,
 					"prefill_pod_ip", prefillPod.Status.PodIP,
+					"prefill_pod_port", targetPort,
 					"elapsed", routingCtx.Elapsed(time.Now()))
 				return
 			}
@@ -539,6 +591,7 @@ func (r *pdRouter) doPrefillRequest(routingCtx *types.RoutingContext, prefillPod
 			"llm_engine", llmEngine,
 			"prefill_pod", prefillPod.Name,
 			"prefill_pod_ip", prefillPod.Status.PodIP,
+			"prefill_pod_port", targetPort,
 			"elapsed", routingCtx.Elapsed(time.Now()))
 	default:
 		defer r.prefillRequestTracker.RemovePrefillRequest(routingCtx.RequestID)
@@ -552,6 +605,7 @@ func (r *pdRouter) doPrefillRequest(routingCtx *types.RoutingContext, prefillPod
 			"llm_engine", llmEngine,
 			"prefill_pod", prefillPod.Name,
 			"prefill_pod_ip", prefillPod.Status.PodIP,
+			"prefill_pod_port", targetPort,
 			"elapsed", routingCtx.Elapsed(time.Now()))
 	}
 
@@ -670,6 +724,9 @@ func (r *pdRouter) updateRoutingContextWithKVTransferParams(routingCtx *types.Ro
 		return fmt.Errorf("kv_transfer_params has unexpected type %T, expected map[string]any", kvTransferParams)
 	}
 	kvTransferParamsMap["remote_host"] = prefillPod.Status.PodIP
+	if routingCtx.TargetPort() > 0 {
+		kvTransferParamsMap["remote_port"] = routingCtx.TargetPort()
+	}
 
 	// Marshal the updated request body
 	updatedReqBody, err := json.Marshal(originalRequest)
@@ -800,6 +857,22 @@ func (t *PrefillRequestTracker) GetPrefillRequestCountsForPods(pods []*v1.Pod) m
 	return counts
 }
 
+func (t *PrefillRequestTracker) getPrefillRequestCountsForPodsWithPort(pods []*v1.Pod) map[string]int32 {
+	counts := make(map[string]int32)
+	for _, pod := range pods {
+		for _, port := range utils.GetPortsForPod(pod) {
+			keyName := fmt.Sprintf("%s/%d", pod.Name, port)
+			countInterface, exists := t.podRequestCounts.Load(keyName)
+			if !exists {
+				counts[keyName] = 0
+			} else {
+				counts[keyName] = countInterface.(*atomic.Int32).Load()
+			}
+		}
+	}
+	return counts
+}
+
 func (r *pdRouter) isPodSuitableForPromptLength(pod *v1.Pod, promptLength int) bool {
 	minLength, maxLength := r.getPodPromptRange(pod)
 
@@ -832,4 +905,39 @@ func (r *pdRouter) getPodPromptRange(pod *v1.Pod) (int, int) {
 	}
 
 	return minLength, maxLength
+}
+
+func (r *pdRouter) getPodInstanceKeys(pod *v1.Pod) []string {
+	if !r.isMultiServerPort {
+		return []string{pod.Name}
+	}
+	ports := utils.GetPortsForPod(pod)
+	keys := make([]string, 0, len(ports))
+	for _, p := range ports {
+		keys = append(keys, pod.Name+"/"+strconv.Itoa(p))
+	}
+	return keys
+}
+
+func (r *pdRouter) extractPortFromKey(key string) int {
+	parts := strings.Split(key, "/")
+	if len(parts) == 2 {
+		port, _ := strconv.Atoi(parts[1])
+		return port
+	}
+	return 0
+}
+
+func (r *pdRouter) getPodMetric(name, namespace, metricName string, port int) (metrics.MetricValue, error) {
+	if port <= 0 {
+		return r.cache.GetMetricValueByPod(name, namespace, metricName)
+	}
+	return r.cache.GetMetricValueByPodWithPort(name, namespace, metricName, port)
+}
+
+func (r *pdRouter) getPodModelMetric(name, namespace, model, metricName string, port int) (metrics.MetricValue, error) {
+	if port <= 0 {
+		return r.cache.GetMetricValueByPodModel(name, namespace, model, metricName)
+	}
+	return r.cache.GetMetricValueByPodModelWithPort(name, namespace, model, metricName, port)
 }

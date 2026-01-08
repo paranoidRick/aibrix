@@ -70,10 +70,11 @@ func (m MetricType) IsQuery() bool {
 type MetricScope string
 
 const (
-	ModelMetricScope    MetricScope = "Model"
-	PodMetricScope      MetricScope = "Pod"
-	PodModelMetricScope MetricScope = "PodModel" // model in pod
-	PortMetricScope     MetricScope = "Port"
+	ModelMetricScope     MetricScope = "Model"
+	PodMetricScope       MetricScope = "Pod"
+	PodModelMetricScope  MetricScope = "PodModel" // model in pod
+	PortMetricScope      MetricScope = "Port"
+	PortModelMetricScope MetricScope = "PortModel"
 )
 
 // Metric defines a unique metric with metadata.

@@ -112,6 +112,8 @@ type MetricCache interface {
 	//   error: Error information if operation fails
 	GetMetricValueByPodModel(podName, podNamespace, modelName string, metricName string) (metrics.MetricValue, error)
 
+	GetMetricValueByPodModelWithPort(podName, podNamespace, modelName, metricName string, port int) (metrics.MetricValue, error)
+
 	// AddSubscriber adds a metric subscriber
 	// Parameters:
 	//   subscriber: Metric subscriber implementation

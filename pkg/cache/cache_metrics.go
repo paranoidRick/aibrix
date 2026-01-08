@@ -166,6 +166,10 @@ func (c *Store) getPodModelMetricName(modelName string, metricName string) strin
 	return fmt.Sprintf("%s/%s", modelName, metricName)
 }
 
+func (c *Store) getPodModelWithPortMetricName(modelName, metricName string, port int) string {
+	return fmt.Sprintf("%s/%s/%v", modelName, metricName, port)
+}
+
 func (c *Store) updatePodMetrics() {
 	c.metaPods.Range(func(key string, metaPod *Pod) bool {
 		if !utils.FilterReadyPod(metaPod.Pod) {
@@ -180,37 +184,44 @@ func (c *Store) updatePodMetrics() {
 func (c *Store) worker(jobs <-chan *Pod) {
 	for pod := range jobs {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		podMetricPort := getPodMetricPort(pod)
-
-		// Use centralized typed metrics fetcher for better engine abstraction and error handling
-		metricsToFetch := c.getAllAvailableMetrics()
-		endpoint := fmt.Sprintf("%s:%d", pod.Status.PodIP, podMetricPort)
-		engineType := metrics.GetEngineType(*pod.Pod)
-		identifier := pod.Name
-		result, err := c.engineMetricsFetcher.FetchAllTypedMetrics(ctx, endpoint, engineType, identifier, metricsToFetch)
-		if err != nil {
-			klog.V(4).InfoS("Failed to fetch typed metrics from engine pod",
-				"pod", pod.Name, "podIP", pod.Status.PodIP, "port", podMetricPort, "error", err)
-			cancel()
-			continue
+		//podMetricPort := getPodMetricPort(pod)
+		ports := utils.GetPortsForPod(pod.Pod)
+		if len(ports) > 1 {
+			pod.isMultiPort = true
 		}
 
-		// Update pod metrics using typed results
-		c.updatePodMetricsFromTypedResult(pod, result)
+		for _, podMetricPort := range ports {
+			// Use centralized typed metrics fetcher for better engine abstraction and error handling
+			pod.currentPort = podMetricPort
+			metricsToFetch := c.getAllAvailableMetrics()
+			endpoint := fmt.Sprintf("%s:%d", pod.Status.PodIP, podMetricPort)
+			engineType := metrics.GetEngineType(*pod.Pod)
+			identifier := pod.Name
+			result, err := c.engineMetricsFetcher.FetchAllTypedMetrics(ctx, endpoint, engineType, identifier, metricsToFetch)
+			if err != nil {
+				klog.V(4).InfoS("Failed to fetch typed metrics from engine pod",
+					"pod", pod.Name, "podIP", pod.Status.PodIP, "port", podMetricPort, "error", err)
+				cancel()
+				continue
+			}
 
-		// Handle Prometheus-based metrics separately (these require PromQL queries)
-		if c.prometheusApi != nil {
-			c.updateMetricFromPromQL(ctx, pod)
-		} else {
-			klog.V(4).InfoS("Prometheus API not initialized, skipping PromQL metrics", "pod", pod.Name)
+			// Update pod metrics using typed results
+			c.updatePodMetricsFromTypedResult(pod, result)
+
+			// Handle Prometheus-based metrics separately (these require PromQL queries)
+			if c.prometheusApi != nil {
+				c.updateMetricFromPromQL(ctx, pod)
+			} else {
+				klog.V(4).InfoS("Prometheus API not initialized, skipping PromQL metrics", "pod", pod.Name)
+			}
+
+			// Log successful processing
+			klog.V(5).InfoS("Successfully processed metrics for pod",
+				"pod", pod.Name,
+				"podMetrics", len(result.Metrics),
+				"modelMetrics", len(result.ModelMetrics),
+				"errors", len(result.Errors))
 		}
-
-		// Log successful processing
-		klog.V(5).InfoS("Successfully processed metrics for pod",
-			"pod", pod.Name,
-			"podMetrics", len(result.Metrics),
-			"modelMetrics", len(result.ModelMetrics),
-			"errors", len(result.Errors))
 
 		cancel()
 	}
@@ -298,44 +309,46 @@ func (c *Store) updateHistogramMetricFromRawMetrics(pod *Pod, allMetrics map[str
 
 func (c *Store) updateMetricFromPromQL(ctx context.Context, pod *Pod) {
 	podName := pod.Name
-	podMetricPort := getPodMetricPort(pod)
+	//podMetricPort := getPodMetricPort(pod)
 	for _, metricName := range prometheusMetricNames {
-		queryLabels := map[string]string{
-			"instance": fmt.Sprintf("%s:%d", pod.Status.PodIP, podMetricPort),
-		}
-		metric, ok := metrics.Metrics[metricName]
-		if !ok {
-			klog.V(4).Infof("Cannot find %v in the metric list", metricName)
-			continue
-		}
-		scope := metric.MetricScope
-		if scope == metrics.PodMetricScope {
-			err := c.queryUpdatePromQLMetrics(ctx, metric, queryLabels, pod, "", metricName, podMetricPort)
-			if err != nil {
-				klog.V(4).Infof("Failed to query and update PromQL metrics: %v", err)
+		for _, podMetricPort := range utils.GetPortsForPod(pod.Pod) {
+			queryLabels := map[string]string{
+				"instance": fmt.Sprintf("%s:%d", pod.Status.PodIP, podMetricPort),
+			}
+			metric, ok := metrics.Metrics[metricName]
+			if !ok {
+				klog.V(4).Infof("Cannot find %v in the metric list", metricName)
 				continue
 			}
-		} else if scope == metrics.PodModelMetricScope {
-			if pod.Models.Len() > 0 {
-				for _, modelName := range pod.Models.Array() {
-					queryLabels["model_name"] = modelName
-					err := c.queryUpdatePromQLMetrics(ctx, metric, queryLabels, pod, modelName, metricName, podMetricPort)
-					if err != nil {
-						klog.V(4).Infof("Failed to query and update PromQL metrics: %v", err)
-						continue
+			scope := metric.MetricScope
+			if scope == metrics.PodMetricScope {
+				err := c.queryUpdatePromQLMetrics(ctx, metric, queryLabels, pod, "", metricName, podMetricPort)
+				if err != nil {
+					klog.V(4).Infof("Failed to query and update PromQL metrics: %v", err)
+					continue
+				}
+			} else if scope == metrics.PodModelMetricScope {
+				if pod.Models.Len() > 0 {
+					for _, modelName := range pod.Models.Array() {
+						queryLabels["model_name"] = modelName
+						err := c.queryUpdatePromQLMetrics(ctx, metric, queryLabels, pod, modelName, metricName, podMetricPort)
+						if err != nil {
+							klog.V(4).Infof("Failed to query and update PromQL metrics: %v", err)
+							continue
+						}
 					}
+				} else {
+					klog.V(4).Infof("Cannot find model names for pod %s", podName)
 				}
 			} else {
-				klog.V(4).Infof("Cannot find model names for pod %s", podName)
+				klog.V(4).Infof("Scope %v is not supported", scope)
 			}
-		} else {
-			klog.V(4).Infof("Scope %v is not supported", scope)
 		}
 	}
 }
 
 func (c *Store) queryUpdatePromQLMetrics(ctx context.Context, metric metrics.Metric, queryLabels map[string]string, pod *Pod, modelName string, metricName string, podMetricPort int) error {
-	scope := metric.MetricScope
+	scope := getScopeByPort(pod, metric.MetricScope)
 	query := metrics.BuildQuery(metric.PromQL, queryLabels)
 	// Querying metrics
 	result, warnings, err := c.prometheusApi.Query(ctx, query, time.Now())
@@ -399,6 +412,15 @@ func (c *Store) updatePodRecord(pod *Pod, modelName string, metricName string, s
 		// store metric pod with port
 		keyName := metricName + "/" + strconv.Itoa(pod.currentPort)
 		pod.Metrics.Store(keyName, metricValue)
+	} else if scope == metrics.PortModelMetricScope {
+		var err error
+		if modelName == "" {
+			modelName, err = getPodLabel(pod, modelLabel)
+			if err != nil {
+				return fmt.Errorf("modelName should not be empty for scope %v", scope)
+			}
+		}
+		pod.ModelMetrics.Store(c.getPodModelWithPortMetricName(modelName, metricName, pod.currentPort), metricValue)
 	} else {
 		return fmt.Errorf("scope %v is not supported", scope)
 	}
@@ -443,9 +465,11 @@ func (c *Store) getAllAvailableMetrics() []string {
 // updatePodMetricsFromTypedResult processes the typed metrics result and updates pod storage
 func (c *Store) updatePodMetricsFromTypedResult(pod *Pod, result *metrics.EngineMetricsResult) {
 	// Process pod-scoped metrics
+	var scope metrics.MetricScope
 	for metricName, metricValue := range result.Metrics {
 		if metricDef, exists := metrics.Metrics[metricName]; exists {
-			err := c.updatePodRecord(pod, "", metricName, metricDef.MetricScope, metricValue)
+			scope = getScopeByPort(pod, metricDef.MetricScope)
+			err := c.updatePodRecord(pod, "", metricName, scope, metricValue)
 			if err != nil {
 				klog.V(4).InfoS("Failed to update pod metric",
 					"pod", pod.Name, "metric", metricName, "error", err)
@@ -465,7 +489,8 @@ func (c *Store) updatePodMetricsFromTypedResult(pod *Pod, result *metrics.Engine
 				if perSecRate >= 0 { // Only store valid rates (negative means insufficient data)
 					rateMetricName := metrics.AvgGenerationThroughputToksPerS
 					rateValue := &metrics.SimpleMetricValue{Value: perSecRate}
-					_ = c.updatePodRecord(pod, modelName, rateMetricName, metrics.PodModelMetricScope, rateValue)
+					scope = getScopeByPort(pod, metrics.PodModelMetricScope)
+					_ = c.updatePodRecord(pod, modelName, rateMetricName, scope, rateValue)
 					klog.V(4).InfoS("Updating model metric", "pod", pod.Name, "model", modelName,
 						"generation_token_total", metricValue,
 						"avg_generation_throughput_toks_per_s", rateValue)
@@ -474,7 +499,8 @@ func (c *Store) updatePodMetricsFromTypedResult(pod *Pod, result *metrics.Engine
 		}
 
 		if metricDef, exists := metrics.Metrics[metricName]; exists {
-			err := c.updatePodRecord(pod, modelName, metricName, metricDef.MetricScope, metricValue)
+			scope = getScopeByPort(pod, metricDef.MetricScope)
+			err := c.updatePodRecord(pod, modelName, metricName, scope, metricValue)
 			if err != nil {
 				klog.V(4).InfoS("Failed to update model metric",
 					"pod", pod.Name, "model", modelName, "metric", metricName, "error", err)
@@ -485,6 +511,20 @@ func (c *Store) updatePodMetricsFromTypedResult(pod *Pod, result *metrics.Engine
 	// Log any errors from the fetching process
 	for _, err := range result.Errors {
 		klog.V(4).InfoS("Metric fetching error", "pod", pod.Name, "error", err)
+	}
+}
+
+func getScopeByPort(pod *Pod, metricScope metrics.MetricScope) metrics.MetricScope {
+	if !pod.isMultiPort {
+		return metricScope
+	}
+
+	if metricScope == metrics.PodMetricScope {
+		return metrics.PortMetricScope
+	} else if metricScope == metrics.PodModelMetricScope {
+		return metrics.PortModelMetricScope
+	} else {
+		return metricScope
 	}
 }
 
@@ -500,7 +540,12 @@ func parseModelMetricKey(key string) (modelName, metricName string) {
 // calculatePerSecondRate calculates the per-second rate for a given metric
 // Returns the rate in units per second, or -1 if insufficient data
 func (c *Store) calculatePerSecondRate(pod *Pod, modelName, metricName string, currentValue float64) float64 {
-	key := fmt.Sprintf("%s/%s/%s", pod.Name, modelName, metricName)
+	var key string
+	if pod.isMultiPort && pod.currentPort != 0 {
+		key = fmt.Sprintf("%s/%s/%s/%v", pod.Name, modelName, metricName, pod.currentPort)
+	} else {
+		key = fmt.Sprintf("%s/%s/%s", pod.Name, modelName, metricName)
+	}
 	now := time.Now()
 
 	rateCalculator.mu.Lock()

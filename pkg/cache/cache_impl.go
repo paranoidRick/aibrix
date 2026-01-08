@@ -186,6 +186,16 @@ func (c *Store) GetMetricValueByPodModel(podName, podNamespace, modelName string
 	return c.getPodMetricImpl(podName, &metaPod.ModelMetrics, c.getPodModelMetricName(modelName, metricName))
 }
 
+func (c *Store) GetMetricValueByPodModelWithPort(podName, podNamespace, modelName, metricName string, port int) (metrics.MetricValue, error) {
+	key := utils.GeneratePodKey(podNamespace, podName, port)
+	metaPod, ok := c.metaPods.Load(key)
+	if !ok {
+		return nil, fmt.Errorf("key does not exist in the cache: %s", key)
+	}
+
+	return c.getPodMetricImpl(podName, &metaPod.ModelMetrics, c.getPodModelWithPortMetricName(modelName, metricName, port))
+}
+
 // AddRequestCount tracks new request initiation.
 // If ctx is provided,  AddRequestCount can be called multiple times for the same request.
 //

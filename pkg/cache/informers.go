@@ -303,7 +303,7 @@ func (c *Store) addPodLocked(pod *v1.Pod) *Pod {
 
 func (c *Store) addPodWithPortLocked(pod *v1.Pod) {
 	ports := utils.GetPortsForPod(pod)
-	if len(ports) == 0 {
+	if len(ports) <= 1 {
 		return
 	}
 

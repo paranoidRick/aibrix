@@ -40,6 +40,7 @@ type Pod struct {
 	lastTraceLogTimestamp int64
 	// Current process port
 	currentPort int
+	isMultiPort bool
 }
 
 func (pod *Pod) CanLogPodTrace(level klog.Level) bool {

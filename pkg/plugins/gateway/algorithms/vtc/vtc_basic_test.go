@@ -72,6 +72,20 @@ func (c *SimpleCache) GetMetricValueByPodModel(podName, podNamespace, modelName,
 	return &metrics.SimpleMetricValue{Value: 0}, nil
 }
 
+func (c *SimpleCache) GetMetricValueByPodModelWithPort(podName, podNamespace, modelName, metricName string, port int) (metrics.MetricValue, error) {
+	key := utils.GeneratePodKey(podNamespace, podName, port)
+	if _, ok := c.metrics[key]; !ok {
+		return &metrics.SimpleMetricValue{Value: 0}, nil
+	}
+	if _, ok := c.metrics[key][modelName]; !ok {
+		return &metrics.SimpleMetricValue{Value: 0}, nil
+	}
+	if value, ok := c.metrics[key][modelName][metricName]; ok {
+		return &metrics.SimpleMetricValue{Value: value}, nil
+	}
+	return &metrics.SimpleMetricValue{Value: 0}, nil
+}
+
 func (c *SimpleCache) GetMetricValueByPod(podName, podNamespace, metricName string) (metrics.MetricValue, error) {
 	return nil, nil
 }

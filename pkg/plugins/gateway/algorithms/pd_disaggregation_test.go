@@ -303,7 +303,7 @@ func TestFilterPrefillDecodePods(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := types.NewRoutingContext(context.Background(), "test", "model", "message", "test-request", "user")
-			prefill, decode, err := r.filterPrefillDecodePods(ctx, tt.pods)
+			prefill, decode, _, err := r.filterPrefillDecodePods(ctx, tt.pods)
 
 			if tt.expectError {
 				assert.Error(t, err)
